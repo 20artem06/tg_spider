@@ -435,10 +435,11 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    if (event.cron === "0 18 * * *") {
-      ctx.waitUntil(handleDailyReminder(env));
-    } else if (event.cron === "0 19 * * 0") {
+    // Воскресный триггер (19:00 UTC) подводит итоги недели, ежедневный (18:00 UTC) напоминает.
+    if (event.cron.startsWith("0 19")) {
       ctx.waitUntil(handleWeeklySummary(env));
+    } else {
+      ctx.waitUntil(handleDailyReminder(env));
     }
   },
 };

@@ -1,0 +1,15 @@
+name = "sport-challenge-bot"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Ежедневное напоминание в 18:00 UTC (21:00 МСК)
+# и подведение итогов недели в 19:00 UTC по воскресеньям (22:00 МСК)
+[triggers]
+crons = ["0 18 * * *", "0 19 * * 0"]
+
+# Создай KV-namespace в дашборде Cloudflare (Workers & Pages -> KV -> Create),
+# назови её как хочешь, скопируй её id сюда вместо REPLACE_WITH_KV_NAMESPACE_ID
+# и запушь изменение (или добавь biding вручную в настройках Worker'а -> Bindings).
+[[kv_namespaces]]
+binding = "STATE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"

@@ -7,9 +7,7 @@ compatibility_date = "2024-11-01"
 [triggers]
 crons = ["0 18 * * *", "0 19 * * 0"]
 
-# Создай KV-namespace в дашборде Cloudflare (Workers & Pages -> KV -> Create),
-# назови её как хочешь, скопируй её id сюда вместо REPLACE_WITH_KV_NAMESPACE_ID
-# и запушь изменение (или добавь biding вручную в настройках Worker'а -> Bindings).
+# KV-namespace "tg-spider" в дашборде Cloudflare (Storage & databases -> Workers KV).
 [[kv_namespaces]]
 binding = "STATE"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "2a83d0c0fa514991acbd8ef7071551e4"

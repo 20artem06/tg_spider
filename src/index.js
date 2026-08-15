@@ -79,6 +79,26 @@ function formatRuDate(dateStr) {
   return `${d}.${m}`;
 }
 
+const MONTH_NAMES = [
+  "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+  "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+];
+
+function monthOf(dateStr) {
+  return dateStr.slice(0, 7); // "YYYY-MM"
+}
+
+function monthTitle(dateStr) {
+  const [y, m] = dateStr.split("-").map(Number);
+  return `${MONTH_NAMES[m - 1]} ${y}`;
+}
+
+function lastDayOfMonth(dateStr) {
+  const [y, m] = dateStr.split("-").map(Number);
+  const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return `${dateStr.slice(0, 7)}-${String(days).padStart(2, "0")}`;
+}
+
 // ---------- KV helpers ----------
 
 async function getJSON(env, key, fallback) {
@@ -201,7 +221,8 @@ const HELP_TEXT = [
   "/join — стать участником челленджа (нужно 2 человека)",
   "/participants — список участников",
   "/week — прогресс за текущую неделю",
-  "/stats — общая статистика",
+  "/month — статистика за текущий месяц по неделям",
+  "/stats — общая статистика за всё время",
   "/help — это сообщение",
 ].join("\n");
 
@@ -262,6 +283,11 @@ async function handleMessage(env, msg) {
     return;
   }
 
+  if (cmd === "/month") {
+    await sendMonthStatus(env, chat.id);
+    return;
+  }
+
   if (cmd === "/stats") {
     await sendStats(env, chat.id);
     return;
@@ -310,6 +336,50 @@ async function sendWeekStatus(env, chatId) {
     text += `${mentionHtml(p)}: ${grid}  ${count}/${WEEK_LEN} ${mark}\n`;
   }
   text += "\nПн Вт Ср Чт Пт Сб Вс";
+  await sendMessage(env, chatId, text);
+}
+
+async function sendMonthStatus(env, chatId) {
+  const participants = await getParticipants(env);
+  if (participants.length === 0) {
+    await sendMessage(env, chatId, "Пока никто не присоединился. Используйте /join.");
+    return;
+  }
+  const today = todayStr();
+  const month = monthOf(today);
+  const monthEnd = lastDayOfMonth(today);
+
+  // Недели (Пн–Вс), которые пересекаются с этим месяцем и уже начались.
+  const weeks = [];
+  let monday = mondayOf(`${month}-01`);
+  while (monday <= monthEnd && monday <= today) {
+    weeks.push(monday);
+    monday = addDays(monday, 7);
+  }
+
+  let text = `📆 <b>${monthTitle(today)}</b>\n`;
+  for (const p of participants) {
+    let monthCount = 0;
+    let weeksPassed = 0;
+    let rows = "";
+
+    for (const weekStart of weeks) {
+      const dates = weekDates(weekStart);
+      const { grid, count } = await buildWeekGrid(env, p, dates, today);
+      for (const d of dates) {
+        if (monthOf(d) === month && (await isDone(env, p.id, d))) monthCount += 1;
+      }
+
+      const done = count >= NEED_PER_WEEK;
+      if (done) weeksPassed += 1;
+      const isCurrent = weekStart === mondayOf(today);
+      const mark = done ? "✅" : isCurrent ? "⏳" : "❌";
+      rows += `${formatRuDate(weekStart)}–${formatRuDate(dates[6])}  ${grid}  ${count}/${WEEK_LEN} ${mark}\n`;
+    }
+
+    text += `\n<b>${escapeHtml(p.name)}</b> — ${monthCount} отчётов за месяц, норма выполнена в ${weeksPassed} из ${weeks.length} недель\n${rows}`;
+  }
+  text += "\nПн Вт Ср Чт Пт Сб Вс — порядок дней в строке";
   await sendMessage(env, chatId, text);
 }
 

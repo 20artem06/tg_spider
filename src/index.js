@@ -24,19 +24,19 @@ async function tg(env, method, params) {
   return data;
 }
 
-// Постоянная клавиатура: висит снизу, чтобы не набирать команды руками.
-const BTN_WEEK = "📅 Неделя";
-const BTN_MONTH = "📆 Месяц";
-const BTN_STATS = "📊 Статистика";
-const BTN_HELP = "❓ Помощь";
-
+// Inline-меню: висит под сообщением бота. Нажатие не пишет ничего в чат
+// и не создаёт reply — бот просто перерисовывает то же сообщение.
 const KEYBOARD = {
-  keyboard: [
-    [{ text: BTN_WEEK }, { text: BTN_MONTH }],
-    [{ text: BTN_STATS }, { text: BTN_HELP }],
+  inline_keyboard: [
+    [
+      { text: "📅 Неделя", callback_data: "week" },
+      { text: "📆 Месяц", callback_data: "month" },
+    ],
+    [
+      { text: "📊 Статистика", callback_data: "stats" },
+      { text: "❓ Помощь", callback_data: "help" },
+    ],
   ],
-  resize_keyboard: true,
-  is_persistent: true,
 };
 
 function sendMessage(env, chatId, text, extra = {}) {
@@ -47,6 +47,17 @@ function sendMessage(env, chatId, text, extra = {}) {
     disable_web_page_preview: true,
     reply_markup: KEYBOARD,
     ...extra,
+  });
+}
+
+function editMessage(env, chatId, messageId, text) {
+  return tg(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: KEYBOARD,
   });
 }
 
@@ -246,12 +257,13 @@ function commandName(text) {
   return text.trim().split(/\s+/)[0].split("@")[0].toLowerCase();
 }
 
-// Нажатие кнопки приходит обычным текстом — сводим его к соответствующей команде.
+// Раньше меню было нижней клавиатурой; у кого-то она могла остаться в клиенте,
+// поэтому такие нажатия (они приходят обычным текстом) всё ещё понимаем.
 const BUTTON_COMMANDS = {
-  [BTN_WEEK]: "/week",
-  [BTN_MONTH]: "/month",
-  [BTN_STATS]: "/stats",
-  [BTN_HELP]: "/help",
+  "📅 Неделя": "/week",
+  "📆 Месяц": "/month",
+  "📊 Статистика": "/stats",
+  "❓ Помощь": "/help",
 };
 
 // Принимает "13.08", "13.8.2026" или "2026-08-13" и возвращает "YYYY-MM-DD".
@@ -291,7 +303,7 @@ const HELP_TEXT = [
   "Отчёт засчитывается автоматически, как только участник присылает в группу фото или видео/кружок.",
   "На неполной первой неделе (старт 13.08) норма меньше — 3 отчёта из 4 дней.",
   "",
-  "Внизу есть кнопки — статистику можно смотреть ими, команды набирать не обязательно.",
+  "Статистику удобнее смотреть кнопками под сообщением бота — команды набирать не обязательно.",
   "",
   "Команды:",
   "/join — стать участником челленджа (нужно 2 человека)",
@@ -324,7 +336,9 @@ async function handleMessage(env, msg) {
   const cmd = BUTTON_COMMANDS[(msg.text || "").trim()] || commandName(msg.text);
 
   if (cmd === "/start" || cmd === "/help") {
-    await sendMessage(env, chat.id, HELP_TEXT);
+    // Заодно убираем старую нижнюю клавиатуру, если она осталась у кого-то в клиенте.
+    await sendMessage(env, chat.id, HELP_TEXT, { reply_markup: { remove_keyboard: true } });
+    await sendMessage(env, chat.id, await weekText(env));
     return;
   }
 
@@ -349,30 +363,20 @@ async function handleMessage(env, msg) {
   if (cmd === "/participants") {
     const list = await getParticipants(env);
     if (list.length === 0) {
-      await sendMessage(env, chat.id, "Пока никто не присоединился. Используйте /join.");
+      await sendMessage(env, chat.id, NO_PARTICIPANTS);
     } else {
       await sendMessage(env, chat.id, "Участники:\n" + list.map((p) => "• " + mentionHtml(p)).join("\n"));
     }
     return;
   }
 
-  if (cmd === "/week" || cmd === "/status") {
-    await sendWeekStatus(env, chat.id);
-    return;
-  }
-
-  if (cmd === "/month") {
-    await sendMonthStatus(env, chat.id);
+  if (cmd === "/week" || cmd === "/status" || cmd === "/month" || cmd === "/stats") {
+    await sendMessage(env, chat.id, await viewText(env, cmd.slice(1) === "status" ? "week" : cmd.slice(1)));
     return;
   }
 
   if (cmd === "/mark" || cmd === "/unmark") {
     await handleManualMark(env, chat.id, from, msg.text, cmd === "/unmark");
-    return;
-  }
-
-  if (cmd === "/stats") {
-    await sendStats(env, chat.id);
     return;
   }
 
@@ -460,12 +464,11 @@ async function handleManualMark(env, chatId, from, text, removing) {
   );
 }
 
-async function sendWeekStatus(env, chatId) {
+const NO_PARTICIPANTS = "Пока никто не присоединился. Используйте /join.";
+
+async function weekText(env) {
   const participants = await getParticipants(env);
-  if (participants.length === 0) {
-    await sendMessage(env, chatId, "Пока никто не присоединился. Используйте /join.");
-    return;
-  }
+  if (participants.length === 0) return NO_PARTICIPANTS;
   const today = todayStr();
   const monday = mondayOf(today);
   const dates = weekDates(monday);
@@ -481,15 +484,12 @@ async function sendWeekStatus(env, chatId) {
     text += `${mentionHtml(p)}: ${grid}  ${count}/${total} ${mark}\n`;
   }
   text += "\nПн Вт Ср Чт Пт Сб Вс";
-  await sendMessage(env, chatId, text);
+  return text;
 }
 
-async function sendMonthStatus(env, chatId) {
+async function monthText(env) {
   const participants = await getParticipants(env);
-  if (participants.length === 0) {
-    await sendMessage(env, chatId, "Пока никто не присоединился. Используйте /join.");
-    return;
-  }
+  if (participants.length === 0) return NO_PARTICIPANTS;
   const today = todayStr();
   const month = monthOf(today);
   const monthEnd = lastDayOfMonth(today);
@@ -526,15 +526,12 @@ async function sendMonthStatus(env, chatId) {
     text += `\n<b>${escapeHtml(p.name)}</b> — ${monthCount} отчётов за месяц, норма выполнена в ${weeksPassed} из ${weeks.length} недель\n${rows}`;
   }
   text += "\nПн Вт Ср Чт Пт Сб Вс — порядок дней в строке";
-  await sendMessage(env, chatId, text);
+  return text;
 }
 
-async function sendStats(env, chatId) {
+async function statsText(env) {
   const participants = await getParticipants(env);
-  if (participants.length === 0) {
-    await sendMessage(env, chatId, "Пока никто не присоединился. Используйте /join.");
-    return;
-  }
+  if (participants.length === 0) return NO_PARTICIPANTS;
   let text = "📊 <b>Общая статистика</b>\n\n";
   for (const p of participants) {
     const s = await getStats(env, p.id);
@@ -545,7 +542,29 @@ async function sendStats(env, chatId) {
       `  Недель сыграно: ${s.weeksPlayed} (выиграно ${s.weeksWon} / проиграно ${weeksLost})\n` +
       `  Текущая серия побед: ${s.currentStreak} (лучшая: ${s.bestStreak})\n\n`;
   }
-  await sendMessage(env, chatId, text.trim());
+  return text.trim();
+}
+
+// Текст для каждой кнопки меню и для одноимённых команд.
+async function viewText(env, view) {
+  if (view === "week") return weekText(env);
+  if (view === "month") return monthText(env);
+  if (view === "stats") return statsText(env);
+  return HELP_TEXT;
+}
+
+// Нажатие inline-кнопки: перерисовываем то же сообщение нужным разделом.
+async function handleCallback(env, query) {
+  const msg = query.message;
+  await tg(env, "answerCallbackQuery", { callback_query_id: query.id });
+  if (!msg) return;
+
+  const text = await viewText(env, query.data);
+  const res = await editMessage(env, msg.chat.id, msg.message_id, text);
+  // "message is not modified" — просто значит, что раздел уже открыт.
+  if (!res.ok && !/not modified/i.test(res.description || "")) {
+    await sendMessage(env, msg.chat.id, text);
+  }
 }
 
 // ---------- Cron ----------
@@ -637,12 +656,11 @@ export default {
       } catch {
         return new Response("Bad Request", { status: 400 });
       }
-      if (update.message) {
-        try {
-          await handleMessage(env, update.message);
-        } catch (err) {
-          console.error("handleMessage error", err);
-        }
+      try {
+        if (update.message) await handleMessage(env, update.message);
+        else if (update.callback_query) await handleCallback(env, update.callback_query);
+      } catch (err) {
+        console.error("update handling error", err);
       }
       return new Response("OK");
     }

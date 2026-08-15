@@ -5,6 +5,10 @@ const TZ = "Europe/Moscow";
 const NEED_PER_WEEK = 5;
 const WEEK_LEN = 7;
 
+// Челлендж начался в четверг 13.08.2026, поэтому первая неделя неполная:
+// в ней всего 4 дня (Чт–Вс) и норма пропорционально меньше — 3 отчёта.
+const CHALLENGE_START = "2026-08-13";
+
 // ---------- Telegram API ----------
 
 async function tg(env, method, params) {
@@ -173,6 +177,16 @@ async function markDone(env, userId, dateStr) {
   return true;
 }
 
+async function unmarkDone(env, userId, dateStr) {
+  const key = `done:${userId}:${dateStr}`;
+  if ((await env.STATE.get(key)) !== "1") return false;
+  await env.STATE.delete(key);
+  const stats = await getStats(env, userId);
+  stats.totalDays = Math.max(0, stats.totalDays - 1);
+  await putJSON(env, `stats:${userId}`, stats);
+  return true;
+}
+
 async function getStats(env, userId) {
   return getJSON(env, `stats:${userId}`, {
     totalDays: 0,
@@ -193,11 +207,25 @@ async function weekCountFor(env, userId, dates) {
   return count;
 }
 
+// Дни недели, которые входят в челлендж (на первой неделе их меньше семи).
+function activeDates(dates) {
+  return dates.filter((d) => d >= CHALLENGE_START);
+}
+
+// Норма недели: на полной — 5, на неполной — пропорционально числу её дней.
+function requiredForWeek(mondayStr) {
+  const active = activeDates(weekDates(mondayStr)).length;
+  if (active >= WEEK_LEN) return NEED_PER_WEEK;
+  return Math.max(1, Math.ceil((active * NEED_PER_WEEK) / WEEK_LEN));
+}
+
 async function buildWeekGrid(env, participant, dates, today) {
   let grid = "";
   let count = 0;
   for (const d of dates) {
-    if (await isDone(env, participant.id, d)) {
+    if (d < CHALLENGE_START) {
+      grid += "▫️"; // до старта челленджа
+    } else if (await isDone(env, participant.id, d)) {
       grid += "✅";
       count += 1;
     } else if (d === today) {
@@ -226,6 +254,27 @@ const BUTTON_COMMANDS = {
   [BTN_HELP]: "/help",
 };
 
+// Принимает "13.08", "13.8.2026" или "2026-08-13" и возвращает "YYYY-MM-DD".
+function parseDateArg(text, today) {
+  const arg = (text || "").trim().split(/\s+/)[1];
+  if (!arg) return null;
+
+  let iso = null;
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(arg);
+  if (m) {
+    iso = `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+  } else if ((m = /^(\d{1,2})[.\/](\d{1,2})(?:[.\/](\d{2,4}))?$/.exec(arg))) {
+    let year = m[3] ? Number(m[3]) : Number(today.slice(0, 4));
+    if (year < 100) year += 2000;
+    iso = `${year}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  }
+  if (!iso) return null;
+
+  // Отсекаем несуществующие даты вроде 31.02.
+  const d = new Date(`${iso}T12:00:00Z`);
+  return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === iso ? iso : null;
+}
+
 function hasReportMedia(msg) {
   return Boolean(
     msg.photo ||
@@ -240,6 +289,7 @@ const HELP_TEXT = [
   "",
   "Правила: минимум 5 отчётов (фото или кружок/видео со спортплощадки) в неделю (Пн–Вс).",
   "Отчёт засчитывается автоматически, как только участник присылает в группу фото или видео/кружок.",
+  "На неполной первой неделе (старт 13.08) норма меньше — 3 отчёта из 4 дней.",
   "",
   "Внизу есть кнопки — статистику можно смотреть ими, команды набирать не обязательно.",
   "",
@@ -249,6 +299,8 @@ const HELP_TEXT = [
   "/week — прогресс за текущую неделю",
   "/month — статистика за текущий месяц по неделям",
   "/stats — общая статистика за всё время",
+  "/mark 13.08 — отметить прошедший день (если бот тогда не работал)",
+  "/unmark 13.08 — снять отметку",
   "/help — это сообщение",
 ].join("\n");
 
@@ -314,6 +366,11 @@ async function handleMessage(env, msg) {
     return;
   }
 
+  if (cmd === "/mark" || cmd === "/unmark") {
+    await handleManualMark(env, chat.id, from, msg.text, cmd === "/unmark");
+    return;
+  }
+
   if (cmd === "/stats") {
     await sendStats(env, chat.id);
     return;
@@ -331,17 +388,76 @@ async function handleMessage(env, msg) {
     const monday = mondayOf(today);
     const dates = weekDates(monday);
     const count = await weekCountFor(env, participant.id, dates);
+    const need = requiredForWeek(monday);
     const statusLine =
-      count >= NEED_PER_WEEK
+      count >= need
         ? "✅ норма на эту неделю уже выполнена!"
-        : `нужно ещё ${NEED_PER_WEEK - count} до нормы (${NEED_PER_WEEK}/${WEEK_LEN})`;
+        : `нужно ещё ${need - count} до нормы (${need} из ${activeDates(dates).length})`;
 
     await sendMessage(
       env,
       chat.id,
-      `📸 Отчёт засчитан для ${mentionHtml(participant)} (${formatRuDate(today)})!\nНеделя: ${count}/${WEEK_LEN}, ${statusLine}`
+      `📸 Отчёт засчитан для ${mentionHtml(participant)} (${formatRuDate(today)})!\nНеделя: ${count}, ${statusLine}`
     );
   }
+}
+
+// Отметить (или снять) день задним числом — например, если бот тогда ещё не работал.
+async function handleManualMark(env, chatId, from, text, removing) {
+  const participants = await getParticipants(env);
+  const participant = participants.find((p) => p.id === from.id);
+  if (!participant) {
+    await sendMessage(env, chatId, "Сначала присоединись к челленджу: /join");
+    return;
+  }
+
+  const today = todayStr();
+  const date = parseDateArg(text, today);
+  if (!date) {
+    await sendMessage(
+      env,
+      chatId,
+      `Укажи дату: <code>${removing ? "/unmark" : "/mark"} 13.08</code>`
+    );
+    return;
+  }
+  if (date > today) {
+    await sendMessage(env, chatId, "Будущие дни отмечать нельзя 🙂");
+    return;
+  }
+  if (date < CHALLENGE_START) {
+    await sendMessage(
+      env,
+      chatId,
+      `Челлендж начался ${formatRuDate(CHALLENGE_START)}, более ранние дни не считаются.`
+    );
+    return;
+  }
+
+  const changed = removing
+    ? await unmarkDone(env, participant.id, date)
+    : await markDone(env, participant.id, date);
+
+  if (!changed) {
+    await sendMessage(
+      env,
+      chatId,
+      removing
+        ? `У ${escapeHtml(participant.name)} за ${formatRuDate(date)} отметки и не было.`
+        : `${formatRuDate(date)} у ${escapeHtml(participant.name)} уже отмечен ✅`
+    );
+    return;
+  }
+
+  const monday = mondayOf(date);
+  const count = await weekCountFor(env, participant.id, weekDates(monday));
+  const need = requiredForWeek(monday);
+  await sendMessage(
+    env,
+    chatId,
+    `${removing ? "🗑 Отметка снята" : "✅ День отмечен"}: ${formatRuDate(date)}, ${mentionHtml(participant)}\n` +
+      `Та неделя: ${count}/${need} до нормы`
+  );
 }
 
 async function sendWeekStatus(env, chatId) {
@@ -355,11 +471,14 @@ async function sendWeekStatus(env, chatId) {
   const dates = weekDates(monday);
   const sunday = dates[dates.length - 1];
 
-  let text = `📅 <b>Неделя ${formatRuDate(monday)}–${formatRuDate(sunday)}</b> (нужно ≥${NEED_PER_WEEK}/${WEEK_LEN})\n\n`;
+  const need = requiredForWeek(monday);
+  const total = activeDates(dates).length;
+
+  let text = `📅 <b>Неделя ${formatRuDate(monday)}–${formatRuDate(sunday)}</b> (нужно ≥${need} из ${total})\n\n`;
   for (const p of participants) {
     const { grid, count } = await buildWeekGrid(env, p, dates, today);
-    const mark = count >= NEED_PER_WEEK ? "✅" : "⏳";
-    text += `${mentionHtml(p)}: ${grid}  ${count}/${WEEK_LEN} ${mark}\n`;
+    const mark = count >= need ? "✅" : "⏳";
+    text += `${mentionHtml(p)}: ${grid}  ${count}/${total} ${mark}\n`;
   }
   text += "\nПн Вт Ср Чт Пт Сб Вс";
   await sendMessage(env, chatId, text);
@@ -375,11 +494,11 @@ async function sendMonthStatus(env, chatId) {
   const month = monthOf(today);
   const monthEnd = lastDayOfMonth(today);
 
-  // Недели (Пн–Вс), которые пересекаются с этим месяцем и уже начались.
+  // Недели (Пн–Вс), которые пересекаются с этим месяцем, уже начались и входят в челлендж.
   const weeks = [];
   let monday = mondayOf(`${month}-01`);
   while (monday <= monthEnd && monday <= today) {
-    weeks.push(monday);
+    if (activeDates(weekDates(monday)).length > 0) weeks.push(monday);
     monday = addDays(monday, 7);
   }
 
@@ -396,11 +515,12 @@ async function sendMonthStatus(env, chatId) {
         if (monthOf(d) === month && (await isDone(env, p.id, d))) monthCount += 1;
       }
 
-      const done = count >= NEED_PER_WEEK;
+      const need = requiredForWeek(weekStart);
+      const done = count >= need;
       if (done) weeksPassed += 1;
       const isCurrent = weekStart === mondayOf(today);
       const mark = done ? "✅" : isCurrent ? "⏳" : "❌";
-      rows += `${formatRuDate(weekStart)}–${formatRuDate(dates[6])}  ${grid}  ${count}/${WEEK_LEN} ${mark}\n`;
+      rows += `${formatRuDate(weekStart)}–${formatRuDate(dates[6])}  ${grid}  ${count}/${activeDates(dates).length} (нужно ${need}) ${mark}\n`;
     }
 
     text += `\n<b>${escapeHtml(p.name)}</b> — ${monthCount} отчётов за месяц, норма выполнена в ${weeksPassed} из ${weeks.length} недель\n${rows}`;
@@ -461,10 +581,14 @@ async function handleWeeklySummary(env) {
   const dates = weekDates(monday);
   const sunday = dates[dates.length - 1];
 
+  const need = requiredForWeek(monday);
+  const total = activeDates(dates).length;
+  if (total === 0) return; // неделя целиком до старта челленджа
+
   const results = [];
   for (const p of participants) {
     const count = await weekCountFor(env, p.id, dates);
-    const passed = count >= NEED_PER_WEEK;
+    const passed = count >= need;
     results.push({ p, count, passed });
 
     const stats = await getStats(env, p.id);
@@ -481,9 +605,9 @@ async function handleWeeklySummary(env) {
 
   await env.STATE.put(weekKey, JSON.stringify(results.map((r) => ({ id: r.p.id, count: r.count, passed: r.passed }))));
 
-  let text = `🏁 <b>Итоги недели ${formatRuDate(monday)}–${formatRuDate(sunday)}</b>\n\n`;
+  let text = `🏁 <b>Итоги недели ${formatRuDate(monday)}–${formatRuDate(sunday)}</b> (нужно ≥${need} из ${total})\n\n`;
   for (const r of results) {
-    text += `${mentionHtml(r.p)}: ${r.count}/${WEEK_LEN} ${r.passed ? "✅" : "❌"}\n`;
+    text += `${mentionHtml(r.p)}: ${r.count}/${total} ${r.passed ? "✅" : "❌"}\n`;
   }
   const losers = results.filter((r) => !r.passed);
   if (losers.length === 0) {

@@ -20,12 +20,28 @@ async function tg(env, method, params) {
   return data;
 }
 
+// Постоянная клавиатура: висит снизу, чтобы не набирать команды руками.
+const BTN_WEEK = "📅 Неделя";
+const BTN_MONTH = "📆 Месяц";
+const BTN_STATS = "📊 Статистика";
+const BTN_HELP = "❓ Помощь";
+
+const KEYBOARD = {
+  keyboard: [
+    [{ text: BTN_WEEK }, { text: BTN_MONTH }],
+    [{ text: BTN_STATS }, { text: BTN_HELP }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+};
+
 function sendMessage(env, chatId, text, extra = {}) {
   return tg(env, "sendMessage", {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: true,
+    reply_markup: KEYBOARD,
     ...extra,
   });
 }
@@ -202,6 +218,14 @@ function commandName(text) {
   return text.trim().split(/\s+/)[0].split("@")[0].toLowerCase();
 }
 
+// Нажатие кнопки приходит обычным текстом — сводим его к соответствующей команде.
+const BUTTON_COMMANDS = {
+  [BTN_WEEK]: "/week",
+  [BTN_MONTH]: "/month",
+  [BTN_STATS]: "/stats",
+  [BTN_HELP]: "/help",
+};
+
 function hasReportMedia(msg) {
   return Boolean(
     msg.photo ||
@@ -216,6 +240,8 @@ const HELP_TEXT = [
   "",
   "Правила: минимум 5 отчётов (фото или кружок/видео со спортплощадки) в неделю (Пн–Вс).",
   "Отчёт засчитывается автоматически, как только участник присылает в группу фото или видео/кружок.",
+  "",
+  "Внизу есть кнопки — статистику можно смотреть ими, команды набирать не обязательно.",
   "",
   "Команды:",
   "/join — стать участником челленджа (нужно 2 человека)",
@@ -243,7 +269,7 @@ async function handleMessage(env, msg) {
   const boundChatId = await bindChat(env, chat.id);
   if (String(chat.id) !== String(boundChatId)) return; // бот привязан к другой группе
 
-  const cmd = commandName(msg.text);
+  const cmd = BUTTON_COMMANDS[(msg.text || "").trim()] || commandName(msg.text);
 
   if (cmd === "/start" || cmd === "/help") {
     await sendMessage(env, chat.id, HELP_TEXT);

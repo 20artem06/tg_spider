@@ -182,9 +182,6 @@ async function markDone(env, userId, dateStr) {
   const existing = await env.STATE.get(key);
   if (existing === "1") return false;
   await env.STATE.put(key, "1");
-  const stats = await getStats(env, userId);
-  stats.totalDays += 1;
-  await putJSON(env, `stats:${userId}`, stats);
   return true;
 }
 
@@ -192,20 +189,7 @@ async function unmarkDone(env, userId, dateStr) {
   const key = `done:${userId}:${dateStr}`;
   if ((await env.STATE.get(key)) !== "1") return false;
   await env.STATE.delete(key);
-  const stats = await getStats(env, userId);
-  stats.totalDays = Math.max(0, stats.totalDays - 1);
-  await putJSON(env, `stats:${userId}`, stats);
   return true;
-}
-
-async function getStats(env, userId) {
-  return getJSON(env, `stats:${userId}`, {
-    totalDays: 0,
-    weeksPlayed: 0,
-    weeksWon: 0,
-    currentStreak: 0,
-    bestStreak: 0,
-  });
 }
 
 // ---------- Логика недели ----------
@@ -228,6 +212,39 @@ function requiredForWeek(mondayStr) {
   const active = activeDates(weekDates(mondayStr)).length;
   if (active >= WEEK_LEN) return NEED_PER_WEEK;
   return Math.max(1, Math.ceil((active * NEED_PER_WEEK) / WEEK_LEN));
+}
+
+// Недели челленджа, которые уже полностью закрылись.
+function completedWeeks(today) {
+  const weeks = [];
+  const currentMonday = mondayOf(today);
+  for (let m = mondayOf(CHALLENGE_START); m < currentMonday; m = addDays(m, 7)) {
+    weeks.push(m);
+  }
+  return weeks;
+}
+
+// Статистика считается из самих отметок, а не из счётчиков: тогда поздний кружок
+// или /mark за прошлую неделю сразу отражаются в итогах, а не расходятся с ними.
+async function computeStats(env, userId, today) {
+  const stats = { totalDays: 0, weeksPlayed: 0, weeksWon: 0, currentStreak: 0, bestStreak: 0 };
+
+  for (const monday of completedWeeks(today)) {
+    const count = await weekCountFor(env, userId, weekDates(monday));
+    stats.totalDays += count;
+    stats.weeksPlayed += 1;
+    if (count >= requiredForWeek(monday)) {
+      stats.weeksWon += 1;
+      stats.currentStreak += 1;
+      stats.bestStreak = Math.max(stats.bestStreak, stats.currentStreak);
+    } else {
+      stats.currentStreak = 0;
+    }
+  }
+
+  // Текущая неделя ещё не закрыта: её отчёты считаем, а в зачёт недель не берём.
+  stats.totalDays += await weekCountFor(env, userId, weekDates(mondayOf(today)));
+  return stats;
 }
 
 async function buildWeekGrid(env, participant, dates, today) {
@@ -313,6 +330,7 @@ const HELP_TEXT = [
   "/stats — общая статистика за всё время",
   "/mark 13.08 — отметить прошедший день (если бот тогда не работал)",
   "/unmark 13.08 — снять отметку",
+  "/summary 16.08 — пересчитать итог той недели заново",
   "/help — это сообщение",
 ].join("\n");
 
@@ -377,6 +395,15 @@ async function handleMessage(env, msg) {
 
   if (cmd === "/mark" || cmd === "/unmark") {
     await handleManualMark(env, chat.id, from, msg.text, cmd === "/unmark");
+    return;
+  }
+
+  // Пересчитать и опубликовать итог недели заново — например, если отчёт пришёл
+  // уже после автоматического объявления.
+  if (cmd === "/summary") {
+    const day = parseDateArg(msg.text, todayStr()) || addDays(todayStr(), -1);
+    const text = await summaryText(env, mondayOf(day));
+    await sendMessage(env, chat.id, text || NO_PARTICIPANTS);
     return;
   }
 
@@ -532,9 +559,10 @@ async function monthText(env) {
 async function statsText(env) {
   const participants = await getParticipants(env);
   if (participants.length === 0) return NO_PARTICIPANTS;
+  const today = todayStr();
   let text = "📊 <b>Общая статистика</b>\n\n";
   for (const p of participants) {
-    const s = await getStats(env, p.id);
+    const s = await computeStats(env, p.id, today);
     const weeksLost = s.weeksPlayed - s.weeksWon;
     text +=
       `${mentionHtml(p)}\n` +
@@ -585,56 +613,45 @@ async function handleDailyReminder(env) {
   await sendMessage(env, chatId, text);
 }
 
+async function summaryText(env, monday) {
+  const participants = await getParticipants(env);
+  const dates = weekDates(monday);
+  const total = activeDates(dates).length;
+  if (participants.length === 0 || total === 0) return null;
+
+  const need = requiredForWeek(monday);
+  const results = [];
+  for (const p of participants) {
+    const count = await weekCountFor(env, p.id, dates);
+    results.push({ p, count, passed: count >= need });
+  }
+
+  let text = `🏁 <b>Итоги недели ${formatRuDate(monday)}–${formatRuDate(dates[6])}</b> (нужно ≥${need} из ${total})\n\n`;
+  for (const r of results) {
+    text += `${mentionHtml(r.p)}: ${r.count}/${total} ${r.passed ? "✅" : "❌"}\n`;
+  }
+  const losers = results.filter((r) => !r.passed);
+  text +=
+    losers.length === 0
+      ? "\n🎉 Все выполнили норму на этой неделе!"
+      : "\n" + losers.map((r) => `💀 ${mentionHtml(r.p)} не выполнил(а) норму!`).join("\n");
+  return text;
+}
+
 async function handleWeeklySummary(env) {
   const chatId = await getChatId(env);
-  const participants = await getParticipants(env);
-  if (!chatId || participants.length === 0) return;
+  if (!chatId) return;
 
   // Триггер срабатывает в 00:00 понедельника по МСК, когда неделя уже закрылась,
   // поэтому итоги подводим по неделе, в которую попадает вчерашний день.
   const monday = mondayOf(addDays(todayStr(), -1));
   const weekKey = `weekresult:${monday}`;
+  if (await env.STATE.get(weekKey)) return; // эта неделя уже подведена
 
-  const already = await env.STATE.get(weekKey);
-  if (already) return; // эта неделя уже подведена
+  const text = await summaryText(env, monday);
+  if (!text) return;
 
-  const dates = weekDates(monday);
-  const sunday = dates[dates.length - 1];
-
-  const need = requiredForWeek(monday);
-  const total = activeDates(dates).length;
-  if (total === 0) return; // неделя целиком до старта челленджа
-
-  const results = [];
-  for (const p of participants) {
-    const count = await weekCountFor(env, p.id, dates);
-    const passed = count >= need;
-    results.push({ p, count, passed });
-
-    const stats = await getStats(env, p.id);
-    stats.weeksPlayed += 1;
-    if (passed) {
-      stats.weeksWon += 1;
-      stats.currentStreak += 1;
-      stats.bestStreak = Math.max(stats.bestStreak, stats.currentStreak);
-    } else {
-      stats.currentStreak = 0;
-    }
-    await putJSON(env, `stats:${p.id}`, stats);
-  }
-
-  await env.STATE.put(weekKey, JSON.stringify(results.map((r) => ({ id: r.p.id, count: r.count, passed: r.passed }))));
-
-  let text = `🏁 <b>Итоги недели ${formatRuDate(monday)}–${formatRuDate(sunday)}</b> (нужно ≥${need} из ${total})\n\n`;
-  for (const r of results) {
-    text += `${mentionHtml(r.p)}: ${r.count}/${total} ${r.passed ? "✅" : "❌"}\n`;
-  }
-  const losers = results.filter((r) => !r.passed);
-  if (losers.length === 0) {
-    text += "\n🎉 Оба выполнили норму на этой неделе!";
-  } else {
-    text += "\n" + losers.map((r) => `💀 ${mentionHtml(r.p)} проиграл(а) на этой неделе!`).join("\n");
-  }
+  await env.STATE.put(weekKey, "1");
   await sendMessage(env, chatId, text);
 }
 

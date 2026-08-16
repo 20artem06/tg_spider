@@ -5,10 +5,10 @@ compatibility_date = "2024-11-01"
 # Публичный адрес <name>.<субдомен>.workers.dev — на него Telegram шлёт вебхук.
 workers_dev = true
 
-# Ежедневное напоминание в 18:00 UTC (21:00 МСК)
-# и подведение итогов недели в 19:00 UTC по воскресеньям (22:00 МСК)
+# Ежедневное напоминание в 18:00 UTC (21:00 МСК) и итоги недели
+# в 21:00 UTC воскресенья — это 00:00 понедельника по Москве, ровно на стыке недель.
 [triggers]
-crons = ["0 18 * * *", "0 19 * * SUN"]
+crons = ["0 18 * * *", "0 21 * * SUN"]
 
 # KV-namespace "tg-spider" в дашборде Cloudflare (Storage & databases -> Workers KV).
 [[kv_namespaces]]

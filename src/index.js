@@ -590,8 +590,9 @@ async function handleWeeklySummary(env) {
   const participants = await getParticipants(env);
   if (!chatId || participants.length === 0) return;
 
-  const today = todayStr();
-  const monday = mondayOf(today);
+  // Триггер срабатывает в 00:00 понедельника по МСК, когда неделя уже закрылась,
+  // поэтому итоги подводим по неделе, в которую попадает вчерашний день.
+  const monday = mondayOf(addDays(todayStr(), -1));
   const weekKey = `weekresult:${monday}`;
 
   const already = await env.STATE.get(weekKey);
@@ -673,8 +674,8 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    // Воскресный триггер (19:00 UTC) подводит итоги недели, ежедневный (18:00 UTC) напоминает.
-    if (event.cron.startsWith("0 19")) {
+    // Воскресный триггер подводит итоги недели, ежедневный — напоминает.
+    if (event.cron.includes("SUN")) {
       ctx.waitUntil(handleWeeklySummary(env));
     } else {
       ctx.waitUntil(handleDailyReminder(env));
